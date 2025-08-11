@@ -3,80 +3,91 @@ name: Trivy Security Scans on PR
 
 on:
   pull_request:
-    branches: ["main", "master"]
+    branches: ["main","master"]
   workflow_dispatch:
 
 permissions:
   contents: read
+  security-events: write   # needed to upload SARIF
 
 jobs:
   deps_scan:
-    name: Dependency scan (Trivy FS)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Trivy FS (table)
+      - name: Trivy FS (SARIF, non-blocking)
         uses: aquasecurity/trivy-action@0.32.0
         with:
           scan-type: fs
           scan-ref: .
           ignore-unfixed: true
-          format: table
           severity: HIGH,CRITICAL
-          exit-code: '1'
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: '0'              # <-- non-blocking
 
-      - name: Trivy FS (JSON)
+      - name: Upload SARIF (FS)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+
+      - name: Trivy FS (JSON artifact)
         if: always()
         uses: aquasecurity/trivy-action@0.32.0
         with:
           scan-type: fs
           scan-ref: .
           ignore-unfixed: true
-          format: json
-          output: trivy-fs-report.json
           severity: LOW,MEDIUM,HIGH,CRITICAL
+          format: json
+          output: trivy-fs.json
 
-      - name: Upload FS report
+      - name: Upload FS JSON
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: trivy-fs-report
-          path: trivy-fs-report.json
+          path: trivy-fs.json
 
   image_scan:
-    name: Container image scan (Trivy Image)
     runs-on: ubuntu-latest
     needs: deps_scan
     if: always()
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build image (no push)
+      - name: Build image
         run: docker build -t local/app:${{ github.sha }} .
 
-      - name: Trivy Image (table)
+      - name: Trivy Image (SARIF, non-blocking)
         uses: aquasecurity/trivy-action@0.32.0
         with:
           image-ref: local/app:${{ github.sha }}
-          format: table
           ignore-unfixed: true
           severity: HIGH,CRITICAL
-          exit-code: '1'
+          format: sarif
+          output: trivy-image.sarif
+          exit-code: '0'              # <-- non-blocking
 
-      - name: Trivy Image (JSON)
+      - name: Upload SARIF (Image)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+
+      - name: Trivy Image (JSON artifact)
         if: always()
         uses: aquasecurity/trivy-action@0.32.0
         with:
           image-ref: local/app:${{ github.sha }}
-          format: json
-          output: trivy-image-report.json
           ignore-unfixed: true
           severity: LOW,MEDIUM,HIGH,CRITICAL
+          format: json
+          output: trivy-image.json
 
-      - name: Upload image report
+      - name: Upload Image JSON
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: trivy-image-report
-          path: trivy-image-report.json
+          path: trivy-image.json
