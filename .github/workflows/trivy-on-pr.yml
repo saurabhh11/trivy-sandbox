@@ -2,10 +2,12 @@ name: Trivy Security Scans on PR
 
 on:
   pull_request:
-    branches: [ "main", "master" ]  # whichever your default branch is
+    branches: [ "main", "master" ]
 
 permissions:
   contents: read
+  # only needed if you later upload SARIF to GitHub Security:
+  # security-events: write
 
 jobs:
   deps_scan:
@@ -15,29 +17,33 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run Trivy filesystem scan (table)
-        uses: aquasecurity/trivy-action@v0
+      # Fail the job on HIGH/CRITICAL, table output to logs
+      - name: Trivy FS (table)
+        uses: aquasecurity/trivy-action@v0.32.0
         with:
-          scan-type: "fs"
-          scan-ref: "."
+          scan-type: fs
+          scan-ref: .
           ignore-unfixed: true
-          format: "table"
-          exit-code: "1"            # Fail on HIGH/CRITICAL
-          severity: "HIGH,CRITICAL"
-          trivyignores: ".trivyignore"
+          format: table
+          exit-code: '1'
+          severity: HIGH,CRITICAL
+          trivyignores: .trivyignore
 
+      # Produce a JSON artifact for later review (doesn't fail job)
       - name: Trivy FS (JSON) artifact
-        uses: aquasecurity/trivy-action@v0
+        if: always()
+        uses: aquasecurity/trivy-action@v0.32.0
         with:
-          scan-type: "fs"
-          scan-ref: "."
+          scan-type: fs
+          scan-ref: .
           ignore-unfixed: true
-          format: "json"
-          output: "trivy-fs-report.json"
-          severity: "LOW,MEDIUM,HIGH,CRITICAL"
-          trivyignores: ".trivyignore"
+          format: json
+          output: trivy-fs-report.json
+          severity: LOW,MEDIUM,HIGH,CRITICAL
+          trivyignores: .trivyignore
 
       - name: Upload FS report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: trivy-fs-report
@@ -47,37 +53,38 @@ jobs:
     name: Container image scan (Trivy Image)
     runs-on: ubuntu-latest
     needs: deps_scan
+    if: always()   # <-- run even if deps_scan failed
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Build image (no push)
         run: docker build -t local/app:${{ github.sha }} .
 
-      - name: Trivy image scan (table)
-        uses: aquasecurity/trivy-action@v0
+      # Fail the job on HIGH/CRITICAL for the image scan
+      - name: Trivy Image (table)
+        uses: aquasecurity/trivy-action@v0.32.0
         with:
-          image-ref: "local/app:${{ github.sha }}"
-          format: "table"
+          image-ref: local/app:${{ github.sha }}
+          format: table
           ignore-unfixed: true
-          exit-code: "1"            # Fail on HIGH/CRITICAL
-          severity: "HIGH,CRITICAL"
-          trivyignores: ".trivyignore"
+          exit-code: '1'
+          severity: HIGH,CRITICAL
+          trivyignores: .trivyignore
 
-      - name: Trivy image scan (JSON) artifact
-        uses: aquasecurity/trivy-action@v0
+      - name: Trivy Image (JSON) artifact
+        if: always()
+        uses: aquasecurity/trivy-action@v0.32.0
         with:
-          image-ref: "local/app:${{ github.sha }}"
-          format: "json"
-          output: "trivy-image-report.json"
+          image-ref: local/app:${{ github.sha }}
+          format: json
+          output: trivy-image-report.json
           ignore-unfixed: true
-          severity: "LOW,MEDIUM,HIGH,CRITICAL"
-          trivyignores: ".trivyignore"
+          severity: LOW,MEDIUM,HIGH,CRITICAL
+          trivyignores: .trivyignore
 
       - name: Upload image report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: trivy-image-report
