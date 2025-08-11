@@ -1,38 +1,34 @@
+# .github/workflows/trivy-on-pr.yml
 name: Trivy Security Scans on PR
 
 on:
   pull_request:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
+  workflow_dispatch:
 
 permissions:
   contents: read
-  # only needed if you later upload SARIF to GitHub Security:
-  # security-events: write
 
 jobs:
   deps_scan:
     name: Dependency scan (Trivy FS)
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # Fail the job on HIGH/CRITICAL, table output to logs
       - name: Trivy FS (table)
-        uses: aquasecurity/trivy-action@v0.32.0
+        uses: aquasecurity/trivy-action@0.32.0
         with:
           scan-type: fs
           scan-ref: .
           ignore-unfixed: true
           format: table
-          exit-code: '1'
           severity: HIGH,CRITICAL
-          trivyignores: .trivyignore
+          exit-code: '1'
 
-      # Produce a JSON artifact for later review (doesn't fail job)
-      - name: Trivy FS (JSON) artifact
+      - name: Trivy FS (JSON)
         if: always()
-        uses: aquasecurity/trivy-action@v0.32.0
+        uses: aquasecurity/trivy-action@0.32.0
         with:
           scan-type: fs
           scan-ref: .
@@ -40,7 +36,6 @@ jobs:
           format: json
           output: trivy-fs-report.json
           severity: LOW,MEDIUM,HIGH,CRITICAL
-          trivyignores: .trivyignore
 
       - name: Upload FS report
         if: always()
@@ -53,35 +48,31 @@ jobs:
     name: Container image scan (Trivy Image)
     runs-on: ubuntu-latest
     needs: deps_scan
-    if: always()   # <-- run even if deps_scan failed
+    if: always()
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Build image (no push)
         run: docker build -t local/app:${{ github.sha }} .
 
-      # Fail the job on HIGH/CRITICAL for the image scan
       - name: Trivy Image (table)
-        uses: aquasecurity/trivy-action@v0.32.0
+        uses: aquasecurity/trivy-action@0.32.0
         with:
           image-ref: local/app:${{ github.sha }}
           format: table
           ignore-unfixed: true
-          exit-code: '1'
           severity: HIGH,CRITICAL
-          trivyignores: .trivyignore
+          exit-code: '1'
 
-      - name: Trivy Image (JSON) artifact
+      - name: Trivy Image (JSON)
         if: always()
-        uses: aquasecurity/trivy-action@v0.32.0
+        uses: aquasecurity/trivy-action@0.32.0
         with:
           image-ref: local/app:${{ github.sha }}
           format: json
           output: trivy-image-report.json
           ignore-unfixed: true
           severity: LOW,MEDIUM,HIGH,CRITICAL
-          trivyignores: .trivyignore
 
       - name: Upload image report
         if: always()
