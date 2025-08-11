@@ -26,7 +26,6 @@ jobs:
           format: table
           severity: HIGH,CRITICAL
           exit-code: '1'
-          trivyignores: .trivyignore
 
       # Also produce a JSON report even if the previous step failed
       - name: Trivy FS (JSON)
@@ -39,7 +38,6 @@ jobs:
           format: json
           output: trivy-fs-report.json
           severity: LOW,MEDIUM,HIGH,CRITICAL
-          trivyignores: .trivyignore
 
       - name: Upload FS report
         if: always()
@@ -68,7 +66,6 @@ jobs:
           ignore-unfixed: true
           severity: HIGH,CRITICAL
           exit-code: '1'
-          trivyignores: .trivyignore
 
       # Also produce a JSON report even if the previous step failed
       - name: Trivy Image (JSON)
@@ -80,7 +77,6 @@ jobs:
           output: trivy-image-report.json
           ignore-unfixed: true
           severity: LOW,MEDIUM,HIGH,CRITICAL
-          trivyignores: .trivyignore
 
       - name: Upload image report
         if: always()
