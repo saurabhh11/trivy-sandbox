@@ -1,7 +1,3 @@
-git switch main
-git pull
-
-cat > .github/workflows/trivy-on-pr.yml <<'YAML'
 name: Trivy Security Scans on PR
 
 on:
@@ -94,4 +90,3 @@ jobs:
         with:
           name: trivy-image-report
           path: trivy-image.json
-YAML
