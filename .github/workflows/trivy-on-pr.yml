@@ -6,7 +6,9 @@ name: Trivy Security Scans on PR
 
 on:
   pull_request:
-    branches: ["main","master"]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 permissions:
@@ -94,4 +96,3 @@ jobs:
         with:
           name: trivy-image-report
           path: trivy-image.json
-YAML
