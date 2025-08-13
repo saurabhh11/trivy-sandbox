@@ -1,92 +1,267 @@
-name: Trivy Security Scans on PR
+name: Trivy SCA (PR delta only)
 
 on:
   pull_request:
-    branches: ["main","master"]
+    branches: ['**']   # ← run for PRs into ANY branch (covers ci/trivy-run-20250811-1721)
+    types: [opened, reopened, synchronize, ready_for_review]
   workflow_dispatch:
 
 permissions:
   contents: read
-  security-events: write
+  pull-requests: write
+
+concurrency:
+  group: trivy-sca-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+env:
+  TRIVY_CACHE_DIR: /tmp/.trivycache
 
 jobs:
-  deps_scan:
+  # 1) Detect directories where dependency files changed
+  detect_sca_paths:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+      has_changes: ${{ steps.mk.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find changed manifest/lock files
+        id: scan
+        shell: bash
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          git diff --name-only "$BASE_SHA" "$GITHUB_SHA" > /tmp/changed.txt
+
+          # Extend if you use other ecosystems
+          PATS='(^|/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|pom\.xml|build\.gradle|gradle\.properties|requirements\.txt|Pipfile\.lock|poetry\.lock|go\.mod|go\.sum|Gemfile\.lock|Cargo\.lock|composer\.lock)$'
+
+          grep -E "$PATS" /tmp/changed.txt | xargs -I{} dirname "{}" | sort -u > /tmp/sca_dirs.txt || true
+          cat /tmp/sca_dirs.txt || true
+
+      - name: Build matrix JSON
+        id: mk
+        shell: bash
+        run: |
+          MATRIX=$(python3 - <<'PY'
+          import json, pathlib
+          p = pathlib.Path('/tmp/sca_dirs.txt')
+          paths = [ln.strip() for ln in (p.read_text().splitlines() if p.exists() else []) if ln.strip()]
+          print(json.dumps({"include": [{"path": d} for d in paths]}))
+          PY
+          )
+          if [ -s /tmp/sca_dirs.txt ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  # 2) For each changed dir, run SCA on BASE and HEAD and save JSON
+  sca_pr_scan:
+    if: github.event_name == 'pull_request' && needs.detect_sca_paths.outputs.has_changes == 'true'
+    needs: detect_sca_paths
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect_sca_paths.outputs.matrix) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Trivy FS (SARIF, non-blocking)
-        uses: aquasecurity/trivy-action@0.32.0
         with:
-          scan-type: fs
-          scan-ref: .
-          ignore-unfixed: true
-          severity: HIGH,CRITICAL
-          format: sarif
-          output: trivy-fs.sarif
-          exit-code: '0'
+          fetch-depth: 0
 
-      - name: Upload SARIF (FS)
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-fs.sarif
-
-      - name: Trivy FS (JSON artifact)
-        if: always()
-        uses: aquasecurity/trivy-action@0.32.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          ignore-unfixed: true
-          severity: LOW,MEDIUM,HIGH,CRITICAL
-          format: json
-          output: trivy-fs.json
-
-      - name: Upload FS JSON
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-fs-report
-          path: trivy-fs.json
-
-  image_scan:
-    runs-on: ubuntu-latest
-    needs: deps_scan
-    if: always()
-    steps:
+      # Checkout BASE into ./base
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
 
-      - name: Build image
-        run: docker build -t local/app:${{ github.sha }} .
+      - name: Prep Trivy cache
+        run: mkdir -p "$TRIVY_CACHE_DIR"
 
-      - name: Trivy Image (SARIF, non-blocking)
+      - name: Sanitize path for filenames
+        id: nm
+        shell: bash
+        run: |
+          NAME="${{ matrix.path }}"
+          SAFE="${NAME//[^A-Za-z0-9_.-]/_}"
+          echo "safe=$SAFE" >> "$GITHUB_OUTPUT"
+
+      - name: Check if base path exists
+        id: chk
+        shell: bash
+        run: |
+          if [ -d "base/${{ matrix.path }}" ] || [ -f "base/${{ matrix.path }}" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # BASE scan (only if path exists)
+      - name: Trivy SCA (BASE) – ${{ matrix.path }}
+        if: steps.chk.outputs.exists == 'true'
         uses: aquasecurity/trivy-action@0.32.0
         with:
-          image-ref: local/app:${{ github.sha }}
-          ignore-unfixed: true
-          severity: HIGH,CRITICAL
-          format: sarif
-          output: trivy-image.sarif
-          exit-code: '0'
-
-      - name: Upload SARIF (Image)
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-image.sarif
-
-      - name: Trivy Image (JSON artifact)
-        if: always()
-        uses: aquasecurity/trivy-action@0.32.0
-        with:
-          image-ref: local/app:${{ github.sha }}
+          scan-type: fs
+          scan-ref: base/${{ matrix.path }}
+          scanners: vuln
           ignore-unfixed: true
           severity: LOW,MEDIUM,HIGH,CRITICAL
           format: json
-          output: trivy-image.json
+          output: base-sca-${{ steps.nm.outputs.safe }}.json
+          cache-dir: ${{ env.TRIVY_CACHE_DIR }}
+          exit-code: '0'
 
-      - name: Upload Image JSON
-        if: always()
+      # If base path doesn't exist (new dir), write an empty base result
+      - name: Create empty BASE result (new dir)
+        if: steps.chk.outputs.exists != 'true'
+        run: |
+          echo '{"Results":[]}' > base-sca-${{ steps.nm.outputs.safe }}.json
+
+      # HEAD scan (SCA only)
+      - name: Trivy SCA (HEAD) – ${{ matrix.path }}
+        uses: aquasecurity/trivy-action@0.32.0
+        with:
+          scan-type: fs
+          scan-ref: ${{ matrix.path }}
+          scanners: vuln
+          ignore-unfixed: true
+          severity: LOW,MEDIUM,HIGH,CRITICAL
+          format: json
+          output: head-sca-${{ steps.nm.outputs.safe }}.json
+          cache-dir: ${{ env.TRIVY_CACHE_DIR }}
+          exit-code: '0'
+
+      - name: Upload per-dir JSONs
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-image-report
-          path: trivy-image.json
+          name: sca-json-${{ steps.nm.outputs.safe }}
+          path: |
+            base-sca-${{ steps.nm.outputs.safe }}.json
+            head-sca-${{ steps.nm.outputs.safe }}.json
+          retention-days: 30
+
+  # 3a) If no dependency change, post the skip note (runs regardless)
+  sca_pr_nochange_comment:
+    needs: detect_sca_paths
+    if: github.event_name == 'pull_request' && needs.detect_sca_paths.outputs.has_changes != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post no-change note
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: "No dependencies were added or changed in this PR — SCA delta scan skipped."
+            });
+
+  # 3b) If there were changes, aggregate diff (introduced only) and post a detailed PR comment
+  sca_pr_diff_and_comment:
+    needs: [detect_sca_paths, sca_pr_scan]
+    if: github.event_name == 'pull_request' && needs.detect_sca_paths.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download per-dir artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sca-json-*
+          merge-multiple: true
+          path: artifacts
+
+      - name: Diff base vs head (introduced only) and comment (with CVE details)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs'), path = require('path');
+
+            function readMap(p){
+              if(!fs.existsSync(p)) return new Map();
+              const raw = JSON.parse(fs.readFileSync(p,'utf8'));
+              const results = Array.isArray(raw) ? raw : (raw.Results || []);
+              const m = new Map();
+              for (const r of results) {
+                const t = r.Target || '';
+                for (const v of (r.Vulnerabilities||[])) {
+                  // Stable key: do NOT include InstalledVersion
+                  const k = [t, v.PkgName, v.VulnerabilityID].join('|');
+                  m.set(k, v);
+                }
+              }
+              return m;
+            }
+
+            const sev = () => ({CRITICAL:0,HIGH:0,MEDIUM:0,LOW:0,UNKNOWN:0});
+            let intro = [], introCounts = sev();
+
+            if (fs.existsSync('artifacts')) {
+              const files = fs.readdirSync('artifacts');
+              for (const b of files.filter(f=>f.startsWith('base-sca-') && f.endsWith('.json'))) {
+                const tag = b.slice('base-sca-'.length, -'.json'.length);
+                const h = `head-sca-${tag}.json`;
+                if (!files.includes(h)) continue;
+
+                const baseMap = readMap(path.join('artifacts', b));
+                const headMap = readMap(path.join('artifacts', h));
+
+                for (const [k,v] of headMap) {
+                  if (!baseMap.has(k)) {
+                    intro.push({tag, v});
+                    (introCounts[v.Severity] ??= 0, introCounts[v.Severity]++);
+                  }
+                }
+              }
+            }
+
+            // Build the markdown
+            const totalIntro = Object.values(introCounts).reduce((a,b)=>a+b,0);
+            let md = `### 🔍 Trivy SCA — PR Delta (new vulnerabilities introduced by this PR)\n` +
+                     `| Severity | Introduced |\n|--|--:|\n` +
+                     `| 🔴 CRITICAL | ${introCounts.CRITICAL} |\n` +
+                     `| 🟠 HIGH     | ${introCounts.HIGH} |\n` +
+                     `| 🟡 MEDIUM   | ${introCounts.MEDIUM} |\n` +
+                     `| 🟢 LOW      | ${introCounts.LOW} |\n\n` +
+                     `Introduced total: **${totalIntro}**\n`;
+
+            // Optional quick list
+            const top = intro.slice(0,5).map(({tag,v}) =>
+              `- **${v.Severity}** ${v.VulnerabilityID} in \`${v.PkgName}${v.InstalledVersion ? '@'+v.InstalledVersion : ''}\` _(dir: ${tag})_`
+            );
+            if (top.length) md += `\n**Top new issues:**\n` + top.join('\n') + '\n';
+
+            // Detailed table: CVE | Description | Current | Fixed
+            function short(s, n = 200) {
+              if (!s) return '';
+              const oneLine = String(s).replace(/\s+/g, ' ').trim();
+              return oneLine.length > n ? oneLine.slice(0, n) + '…' : oneLine;
+            }
+            function esc(s) { return String(s || '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' '); }
+
+            if (intro.length) {
+              const MAX_ROWS = 75; // adjust if needed
+              md += `\n<details>\n<summary><strong>Details (first ${Math.min(MAX_ROWS, intro.length)} of ${intro.length})</strong></summary>\n\n`;
+              md += `| CVE | Description | Current | Fixed |\n`;
+              md += `|--|--|--:|--:|\n`;
+              for (const { v } of intro.slice(0, MAX_ROWS)) {
+                const cve = v.VulnerabilityID || '—';
+                const desc = esc(short(v.Title || v.Description || '—'));
+                const cur = v.InstalledVersion ? `\`${v.InstalledVersion}\`` : '—';
+                const fix = v.FixedVersion ? `\`${v.FixedVersion}\`` : '`N/A`';
+                md += `| \`${cve}\` | ${desc} | ${cur} | ${fix} |\n`;
+              }
+              md += `\n</details>\n`;
+              md += `\n_ℹ️ Full JSON per directory is attached as workflow artifacts (base/head)._`;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: md
+            });
